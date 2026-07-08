@@ -1,0 +1,125 @@
+"""
+Shared execution layer. Every tool call in every phase goes through
+run_tool() so we get one consistent behavior for:
+  - timeouts
+  - missing binaries
+  - non-zero exit codes
+  - raw output saved to disk
+  - a structured result handed back to the caller for branching logic
+
+This is the seam that keeps the decision tree from breaking the moment
+a tool misbehaves.
+"""
+
+import subprocess
+import shutil
+import time
+import os
+
+
+class ToolResult:
+    """What every tool call returns to the decision tree."""
+
+    def __init__(self, tool, command, returncode, stdout, stderr,
+                 timed_out=False, missing=False, duration=0.0, output_file=None):
+        self.tool = tool
+        self.command = command
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.timed_out = timed_out
+        self.missing = missing
+        self.duration = duration
+        self.output_file = output_file
+
+    @property
+    def ok(self):
+        return not self.missing and not self.timed_out and self.returncode == 0
+
+    def __repr__(self):
+        status = "MISSING" if self.missing else "TIMEOUT" if self.timed_out else self.returncode
+        return f"<ToolResult {self.tool} status={status} dur={self.duration:.1f}s>"
+
+
+def tool_available(binary_name):
+    return shutil.which(binary_name) is not None
+
+
+def run_tool(tool_name, command_list, output_path=None, timeout=180, error_log=None):
+    """
+    Run a single external tool.
+
+    tool_name    - short name, e.g. "nmap"
+    command_list - full argv list, e.g. ["nmap", "-sn", "10.0.0.1"]
+    output_path  - if given, raw stdout is written here (raw-output-only policy)
+    timeout      - seconds before we kill it
+    error_log    - path to append error lines to (meta/errors.log)
+
+    Returns a ToolResult. Never raises — every failure mode is captured
+    and returned so the caller can branch on it.
+    """
+    binary = command_list[0]
+
+    if not tool_available(binary):
+        msg = f"[MISSING TOOL] '{binary}' not found on PATH. Command skipped: {' '.join(command_list)}"
+        _log_error(error_log, msg)
+        return ToolResult(tool_name, command_list, None, "", msg, missing=True)
+
+    start = time.time()
+    try:
+        proc = subprocess.run(
+            command_list,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        duration = time.time() - start
+
+        if output_path:
+            _write_raw_output(output_path, command_list, proc.stdout, proc.stderr)
+
+        if proc.returncode != 0:
+            msg = (f"[NON-ZERO EXIT] {tool_name} exited {proc.returncode}. "
+                   f"cmd: {' '.join(command_list)} | stderr: {proc.stderr.strip()[:300]}")
+            _log_error(error_log, msg)
+
+        return ToolResult(tool_name, command_list, proc.returncode,
+                           proc.stdout, proc.stderr, duration=duration,
+                           output_file=output_path)
+
+    except subprocess.TimeoutExpired as e:
+        duration = time.time() - start
+        msg = f"[TIMEOUT] {tool_name} exceeded {timeout}s. cmd: {' '.join(command_list)}"
+        _log_error(error_log, msg)
+        partial_out = e.stdout or ""
+        partial_err = e.stderr or ""
+        if output_path:
+            _write_raw_output(output_path, command_list, partial_out,
+                               partial_err + "\n[PROCESS KILLED: TIMEOUT]")
+        return ToolResult(tool_name, command_list, None, partial_out, partial_err,
+                           timed_out=True, duration=duration, output_file=output_path)
+
+    except Exception as e:
+        msg = f"[EXEC ERROR] {tool_name} raised {type(e).__name__}: {e}. cmd: {' '.join(command_list)}"
+        _log_error(error_log, msg)
+        return ToolResult(tool_name, command_list, None, "", str(e))
+
+
+def _write_raw_output(path, command_list, stdout, stderr):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(f"# command: {' '.join(command_list)}\n")
+        f.write(f"# timestamp: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write("# ---- stdout ----\n")
+        f.write(stdout or "")
+        if stderr:
+            f.write("\n# ---- stderr ----\n")
+            f.write(stderr)
+
+
+def _log_error(error_log, message):
+    print(message)
+    if error_log:
+        os.makedirs(os.path.dirname(error_log), exist_ok=True)
+        with open(error_log, "a") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
