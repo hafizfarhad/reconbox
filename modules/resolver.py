@@ -19,13 +19,17 @@ from config.settings import CLOUD_PTR_PATTERNS
 
 class Target:
     def __init__(self, raw_input, domain=None, ip=None, is_domain_target=False,
-                 ptr_hostname=None, ptr_note=None):
+                 ptr_hostname=None, ptr_note=None, log_messages=None):
         self.raw_input = raw_input
         self.domain = domain
         self.ip = ip
         self.is_domain_target = is_domain_target  # whether domain-tools phase should run
         self.ptr_hostname = ptr_hostname
         self.ptr_note = ptr_note
+        # Resolution happens before we know the output label (and therefore
+        # before errors.log exists), so any resolver-stage errors are buffered
+        # here and flushed to errors.log by brain.py once the path is known.
+        self.log_messages = log_messages or []
 
     @property
     def label(self):
@@ -49,31 +53,35 @@ def _matches_cloud_ptr(hostname):
     return any(pattern.search(hostname) for pattern in CLOUD_PTR_PATTERNS)
 
 
-def resolve_target(raw_input, error_log=None):
+def resolve_target(raw_input):
     raw_input = raw_input.strip()
 
     if _is_ip(raw_input):
-        return _resolve_from_ip(raw_input, error_log)
+        return _resolve_from_ip(raw_input)
     else:
-        return _resolve_from_domain(raw_input, error_log)
+        return _resolve_from_domain(raw_input)
 
 
-def _resolve_from_domain(domain, error_log):
+def _resolve_from_domain(domain):
     ip = None
+    log_messages = []
     try:
         ip = socket.gethostbyname(domain)
     except socket.gaierror as e:
-        _log(error_log, f"[RESOLVER] Could not resolve IP for domain '{domain}': {e}")
+        msg = f"[RESOLVER] Could not resolve IP for domain '{domain}': {e}"
+        print(msg)
+        log_messages.append(msg)
 
     return Target(
         raw_input=domain,
         domain=domain,
         ip=ip,
         is_domain_target=True,
+        log_messages=log_messages,
     )
 
 
-def _resolve_from_ip(ip, error_log):
+def _resolve_from_ip(ip):
     ptr_hostname = None
     try:
         ptr_hostname, _, _ = socket.gethostbyaddr(ip)
@@ -109,12 +117,3 @@ def _resolve_from_ip(ip, error_log):
         ptr_hostname=ptr_hostname,
         ptr_note=f"PTR '{ptr_hostname}' looks like a real domain. Running domain tools too.",
     )
-
-
-def _log(error_log, message):
-    print(message)
-    if error_log:
-        import os
-        os.makedirs(os.path.dirname(error_log), exist_ok=True)
-        with open(error_log, "a") as f:
-            f.write(f"{message}\n")

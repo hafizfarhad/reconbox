@@ -11,10 +11,12 @@ something.
 import os
 
 from modules.executor import run_tool
-from config.settings import TIMEOUTS
+from config.settings import (
+    TIMEOUTS, DEFAULT_SUBDOMAIN_WORDLIST, SUBDOMAIN_BRUTE_MAX,
+)
 
 
-def run_dns_recon(target, phase_dir, error_log):
+def run_dns_recon(target, phase_dir, error_log, config=None):
     os.makedirs(phase_dir, exist_ok=True)
     domain = target.domain
     summary = {"phase": "dns-recon", "steps": []}
@@ -79,6 +81,9 @@ def run_dns_recon(target, phase_dir, error_log):
         })
         summary["subdomains_found"] = 0
 
+    # ---- Deeper DNS: ANY, version.bind, per-NS AXFR, subdomain brute ------
+    _deep_dns(domain, phase_dir, error_log, config, summary)
+
     return summary
 
 
@@ -86,3 +91,72 @@ def _extract_subdomains(subfinder_stdout):
     if not subfinder_stdout:
         return []
     return [line.strip() for line in subfinder_stdout.splitlines() if line.strip()]
+
+
+def _deep_dns(domain, phase_dir, error_log, config, summary):
+    config = config or {}
+
+    # Full ANY dump (server discloses whatever records it's willing to).
+    run_tool("dig-ANY", ["dig", "ANY", domain, "+noall", "+answer"],
+             output_path=os.path.join(phase_dir, "05_dig_ANY.txt"),
+             timeout=TIMEOUTS["default"], error_log=error_log)
+
+    # Enumerate the domain's nameservers, then try an AXFR zone transfer and a
+    # version.bind query against each one.
+    ns_result = run_tool("dig-ns-list", ["dig", "NS", domain, "+short"],
+                         timeout=TIMEOUTS["default"], error_log=error_log)
+    nameservers = [l.strip().rstrip(".") for l in (ns_result.stdout or "").splitlines() if l.strip()]
+    summary["nameservers"] = nameservers
+
+    transfers = []
+    for ns in nameservers:
+        axfr = run_tool(
+            f"dig-axfr-{ns}", ["dig", "AXFR", domain, f"@{ns}"],
+            output_path=os.path.join(phase_dir, f"06_axfr_{_safe(ns)}.txt"),
+            timeout=TIMEOUTS["default"], error_log=error_log)
+        out = axfr.stdout or ""
+        succeeded = axfr.ok and "XFR size" in out and "Transfer failed" not in out
+        transfers.append({"nameserver": ns, "zone_transfer_succeeded": succeeded})
+        run_tool(
+            f"dig-version-{ns}",
+            ["dig", "CH", "TXT", "version.bind", f"@{ns}", "+short"],
+            output_path=os.path.join(phase_dir, f"07_version_{_safe(ns)}.txt"),
+            timeout=TIMEOUTS["default"], error_log=error_log)
+    summary["zone_transfers"] = transfers
+
+    # Active subdomain brute-force via dnsx over a wordlist of candidates.
+    wordlist = config.get("subdomain_wordlist") or DEFAULT_SUBDOMAIN_WORDLIST
+    _subdomain_brute(domain, phase_dir, error_log, wordlist, summary)
+
+
+def _subdomain_brute(domain, phase_dir, error_log, wordlist, summary):
+    if not os.path.isfile(wordlist):
+        summary["subdomain_brute"] = f"skipped -- wordlist not found: {wordlist}"
+        return
+
+    candidates_path = os.path.join(phase_dir, "_brute_candidates.txt")
+    count = 0
+    with open(wordlist, errors="replace") as src, open(candidates_path, "w") as out:
+        for line in src:
+            word = line.strip()
+            if not word or word.startswith("#"):
+                continue
+            out.write(f"{word}.{domain}\n")
+            count += 1
+            if count >= SUBDOMAIN_BRUTE_MAX:
+                break
+
+    result = run_tool(
+        "dnsx-brute", ["dnsx", "-l", candidates_path, "-silent", "-a", "-resp"],
+        output_path=os.path.join(phase_dir, "08_subdomain_brute.txt"),
+        timeout=TIMEOUTS["subdomain_brute"], error_log=error_log)
+    resolved = len([l for l in (result.stdout or "").splitlines() if l.strip()])
+    summary["subdomain_brute"] = {
+        "wordlist": wordlist, "candidates": count,
+        "resolved_lines": resolved, "result": repr(result),
+    }
+
+
+def _safe(name):
+    import re
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", name)

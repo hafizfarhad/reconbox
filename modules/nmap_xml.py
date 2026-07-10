@@ -1,0 +1,112 @@
+"""
+Robust parsing of nmap's XML output (-oX / -oA .xml).
+
+The network-scan phase decides what to do next based on port state, so
+parsing has to be reliable. nmap's normal (stdout) format is easy to
+regex but lossy and format-fragile; the XML output is structured and
+carries the extra fields we care about (reason, service product/version,
+OS matches). We parse the XML file nmap writes rather than its stdout.
+
+Everything here is defensive: a scan that timed out may leave a partial,
+unclosed XML document on disk. We recover whatever hosts/ports nmap
+managed to flush and never raise -- callers fall back to an empty result.
+"""
+
+import xml.etree.ElementTree as ET
+
+
+class NmapScan:
+    """Parsed view of a single nmap XML file."""
+
+    def __init__(self, host_up=False, host_reason=None, ports=None,
+                 os_matches=None, parse_error=None):
+        self.host_up = host_up
+        self.host_reason = host_reason        # e.g. "arp-response", "echo-reply", "user-set"
+        self.ports = ports or {}              # {"22/tcp": {state, reason, service, product, version}}
+        self.os_matches = os_matches or []    # [{"name": ..., "accuracy": ...}]
+        self.parse_error = parse_error        # str if the file was unreadable/partial
+
+    def ports_in_state(self, *states):
+        """Port keys (e.g. '22/tcp') whose state is one of `states`."""
+        return [p for p, info in self.ports.items() if info["state"] in states]
+
+    @property
+    def open_ports(self):
+        return self.ports_in_state("open")
+
+    @property
+    def filtered_ports(self):
+        # open|filtered and closed|filtered are ambiguous-but-possibly-blocked;
+        # we treat them as "filtered" for firewall/evasion decisions.
+        return self.ports_in_state("filtered", "open|filtered", "closed|filtered")
+
+
+def _read_root(xml_path):
+    """
+    Parse the XML file into a root element. Handles the common
+    timed-out-scan case where nmap left an unterminated document by
+    retrying against a repaired copy.
+    """
+    try:
+        return ET.parse(xml_path).getroot(), None
+    except (ET.ParseError, FileNotFoundError, OSError) as e:
+        # Attempt recovery: nmap flushes <host> elements as it goes, so a
+        # truncated file is often valid up to the last complete tag. Close
+        # the root element and re-parse whatever we have.
+        try:
+            with open(xml_path, "r", errors="replace") as f:
+                data = f.read()
+            if "<nmaprun" in data and "</nmaprun>" not in data:
+                # Trim to the last complete </host> and close the run.
+                cut = data.rfind("</host>")
+                if cut != -1:
+                    data = data[:cut + len("</host>")] + "\n</nmaprun>"
+                    return ET.fromstring(data), f"recovered-partial: {e}"
+        except (ET.ParseError, OSError):
+            pass
+        return None, str(e)
+
+
+def parse_scan(xml_path):
+    """Parse an nmap XML file into an NmapScan. Never raises."""
+    root, err = _read_root(xml_path)
+    if root is None:
+        return NmapScan(parse_error=err)
+
+    host_up = False
+    host_reason = None
+    ports = {}
+    os_matches = []
+
+    host = root.find("host")
+    if host is not None:
+        status = host.find("status")
+        if status is not None:
+            host_up = status.get("state") == "up"
+            host_reason = status.get("reason")
+
+        for port in host.findall("./ports/port"):
+            portid = port.get("portid")
+            proto = port.get("protocol")
+            if not portid or not proto:
+                continue
+            state_el = port.find("state")
+            svc_el = port.find("service")
+            state = state_el.get("state") if state_el is not None else "unknown"
+            reason = state_el.get("reason") if state_el is not None else None
+            entry = {"state": state, "reason": reason, "service": None,
+                     "product": None, "version": None}
+            if svc_el is not None:
+                entry["service"] = svc_el.get("name")
+                entry["product"] = svc_el.get("product")
+                entry["version"] = svc_el.get("version")
+            ports[f"{portid}/{proto}"] = entry
+
+        for osmatch in host.findall("./os/osmatch"):
+            os_matches.append({
+                "name": osmatch.get("name"),
+                "accuracy": osmatch.get("accuracy"),
+            })
+
+    return NmapScan(host_up=host_up, host_reason=host_reason, ports=ports,
+                    os_matches=os_matches, parse_error=err)

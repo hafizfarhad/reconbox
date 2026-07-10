@@ -1,133 +1,209 @@
-# Recon Container
+# ReconBox
 
-Automated information-gathering/reconnaissance against a domain or IP.
-Give it one target, get back a structured directory of raw tool output,
-organized by phase, plus a machine-readable run manifest.
+A single-command reconnaissance container. Point it at one domain or IP and
+it runs the full **recon → footprinting → vulnerability-assessment** arc —
+port scanning, per-service enumeration, DNS, and passive OSINT — then drops a
+structured, per-phase evidence directory plus a machine-readable manifest.
 
-This is **recon only** — no exploitation, no active vulnerability
-confirmation. It answers "what does this target's attack surface look
-like," not "is it vulnerable."
+**It does not exploit.** No password brute-forcing, no remote command
+execution, no writes to the target. It maps the attack surface and flags
+known issues; it doesn't try to break in. See [The line it won't
+cross](#the-line-it-wont-cross).
 
-## Usage
+> ⚠️ Only run this against systems you are authorized to test. The container
+> assumes permission has already been established.
+
+---
+
+## Quick start
+
+Pull it (or build it — see [Building](#building)):
+
+```bash
+docker pull hafizfarhad/reconbox:latest
+```
+
+Run it, mounting a folder for the results:
+
+```bash
+mkdir -p output
+docker run --rm -v "$(pwd)/output:/output" hafizfarhad/reconbox scanme.nmap.org
+```
+
+Results land in `./output/<target>/`. A full run is thorough and can take a
+while — watch the [live progress](#watching-progress) to see where it's at.
+
+For the raw-socket features (SYN/UDP/OS scans, evasion, NFS mount) grant the
+extra capabilities:
+
+```bash
+docker run --rm \
+  --cap-add=NET_RAW --cap-add=NET_ADMIN --cap-add=SYS_ADMIN \
+  -v "$(pwd)/output:/output" \
+  hafizfarhad/reconbox 10.129.2.28
+```
+
+Without them nothing crashes — those steps are skipped and noted.
+
+---
+
+## What it runs
+
+| Phase | When | What it does |
+|-------|------|--------------|
+| **network-scan** | always | Host discovery, port scan (SYN as root, else Connect), full `-p-` sweep, UDP scan, firewall detection (ACK), adaptive evasion, service/OS/version deep scan, `vuln` NSE scripts, HTML reports. |
+| **service-enum** | always | Enumerates every open service in depth — FTP, SMB, NFS, Rsync, SMTP, IMAP/POP3, DNS, SNMP, MySQL, MSSQL, Oracle, SSH, RDP, WinRM, WMI, R-services, IPMI, TFTP. |
+| **dns-recon** | domains | whois, `dig` records, subfinder/dnsx, `ANY`, per-nameserver AXFR + `version.bind`, subdomain brute-force. |
+| **web-recon** | domains | httpx, whatweb, katana crawl, gau (archived URLs). |
+| **osint** | domains | crt.sh certificate transparency, TLS certificate SANs, optional Shodan lookup. |
+
+**network-scan is a decision tree, not a fixed list** — evasion only fires
+when a firewall is detected, the deep scan only targets confirmed-open ports,
+and so on. Everything degrades gracefully: a missing tool or a timeout is
+logged, never fatal.
+
+---
+
+## Watching progress
+
+The container prints a live heartbeat (names, counts, timings — never tool
+output) so you can gauge how much longer to wait:
 
 ```
-docker build -t reconbox .
-docker run --rm -v $(pwd)/output:/output reconbox <domain-or-ip>
+[00:00] Phase 1/5 · network-scan
+[00:02]   ✓ nmap-host-discovery (2.1s, exit 0) · 1 steps done
+[03:20] Phase 2/5 · service-enum
+[03:20]   [1/8] smb (445/tcp)
+[03:20]     ▶ nse-smb-445 …
+[19:40] Done · 63 tool runs across 5 phase(s) · total 19:40
 ```
 
-Example:
-```
-docker run --rm -v $(pwd)/output:/output reconbox example.com
-docker run --rm -v $(pwd)/output:/output reconbox 8.8.8.8
+Running detached? Follow it with `docker logs -f <container>`.
+
+---
+
+## Configuration
+
+Everything is configured at **run time** — there's no file to edit. Two ways:
+
+### Interactive (add `-it`)
+
+```bash
+docker run --rm -it -v "$(pwd)/output:/output" hafizfarhad/reconbox 10.129.2.28
 ```
 
-## Output structure
+A short wizard asks whether you want to set advanced options, then walks you
+through them. Just press Enter to accept defaults.
+
+### Environment variables (headless / CI)
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `RECONBOX_USERNAME` / `RECONBOX_PASSWORD` / `RECONBOX_DOMAIN` | Authenticated **read-only** enumeration | anonymous |
+| `RECONBOX_SSH_KEY` | SSH private-key path (must be mounted in) | — |
+| `RECONBOX_SHODAN_KEY` | Enables the Shodan lookup | skipped |
+| `RECONBOX_SOURCE_IP` / `RECONBOX_INTERFACE` / `RECONBOX_DNS_SERVER` | Evasion (off unless set) | off |
+| `RECONBOX_SOURCE_PORT` / `RECONBOX_DECOY_COUNT` | Evasion tuning | `53` / `10` |
+| `RECONBOX_SUBDOMAIN_WORDLIST` / `RECONBOX_SNMP_WORDLIST` | Wordlists (SecLists bundled) | SecLists |
+| `RECONBOX_SUBDOMAIN_MAX` | Cap on subdomain brute candidates | `20000` |
+| `RECONBOX_CONFIGURE=1` / `RECONBOX_NO_PROMPT=1` | Force the wizard on / off | — |
+
+```bash
+docker run --rm \
+  -e RECONBOX_USERNAME=robin -e RECONBOX_PASSWORD=robin \
+  -v "$(pwd)/output:/output" \
+  hafizfarhad/reconbox inlanefreight.htb
+```
+
+**Two tips:**
+
+- **Secrets** (`PASSWORD`, `SHODAN_KEY`) are safer in a file than on the
+  command line (which shows in `docker inspect`): use
+  `--env-file secrets.env`. ReconBox masks them in its own output/logs, but
+  that's separate from Docker's exposure.
+- **File paths** (SSH key, custom wordlist) are paths *inside* the container,
+  so mount the file and point the variable at it:
+  ```bash
+  -v "$(pwd)/id_rsa:/keys/id_rsa:ro" -e RECONBOX_SSH_KEY=/keys/id_rsa
+  ```
+
+---
+
+## Output layout
 
 ```
-output/<label>/
+output/<target>/
 ├── meta/
-│   ├── target_info.json     # how the input was classified, PTR notes, missing tools
-│   ├── run_manifest.json    # every step taken, per phase, with status
-│   └── errors.log           # every missing tool / timeout / non-zero exit, timestamped
-├── network-scan/            # always runs
-│   ├── 01_host_discovery.txt
-│   ├── 02_quick_scan.txt
-│   ├── 03_deep_scan.txt
-│   └── 0[4-7]_evasion_*.txt # only created if filtered ports were found
-├── dns-recon/                # domain targets only
-│   ├── 01_whois.txt
-│   ├── 02_dig_{A,NS,MX,TXT}.txt
-│   ├── 03_subfinder.txt
-│   └── 04_dnsx_resolved.txt
-└── web-recon/                 # domain targets only
-    ├── 01_httpx.txt
-    ├── 02_whatweb.txt
-    ├── 03_katana_crawl.txt
-    └── 04_gau_urls.txt
+│   ├── target_info.json    # how the input was classified + run config (secrets masked)
+│   ├── run_manifest.json    # index of every step, per phase, with status
+│   └── errors.log           # missing tools / timeouts / non-zero exits
+├── network-scan/            # nmap .nmap/.gnmap/.xml per step + html/ reports
+├── service-enum/            # per-service evidence (nse + native-tool output)
+├── dns-recon/               # domains only
+├── web-recon/               # domains only
+└── osint/                   # domains only
 ```
 
-`<label>` is the resolved domain if one exists, otherwise the raw IP.
+`run_manifest.json` is the index; the phase folders are the evidence.
+network-scan uses nmap's native multi-format output (and renders each XML to
+HTML via `xsltproc`); the other phases keep raw tool output untouched.
 
-All tool output files are **raw** — exactly what the tool printed,
-untouched. This is deliberate: it keeps this stage a faithful record of
-what actually happened, and pushes normalization/summarization to a
-later (LLM synthesis) stage rather than lossy-parsing it here.
+---
 
-## Target classification logic (`modules/resolver.py`)
+## The line it won't cross
 
-Input can be a domain or a raw IP. Domain-level tools (whois, subdomain
-enum, crawling, fingerprinting) only make sense against a domain, so:
+ReconBox stops at enumeration and vulnerability *assessment*. On its own it
+will **not**:
 
-- **Input is a domain** → resolve its IP too (network-scan needs an IP
-  or hostname either way), run all three phases.
-- **Input is an IP** → reverse-DNS it (PTR lookup):
-  - No PTR at all → IP-only target. Skip dns-recon and web-recon.
-  - PTR resolves but matches a known cloud-provider auto-generated
-    pattern (e.g. `*.compute.amazonaws.com`, `*.cloudapp.azure.com`) →
-    still IP-only. That PTR isn't something the owner configured, so
-    it's not a domain worth running WHOIS/subdomain-enum against.
-  - PTR resolves to something else → treat as a real domain, run all
-    three phases against it.
+- brute-force passwords (identifier guessing like RID cycling / Oracle SIDs
+  and *default-credential checks* are allowed; password brute-forcing is not);
+- execute remote commands (WMI enumeration uses `rpcdump`, never `wmiexec`);
+- write, upload, delete, or transfer files to the target;
+- run intrusive or denial-of-service NSE scripts.
 
-Cloud PTR patterns live in `config/settings.py` (`CLOUD_PTR_PATTERNS`)
-— add more there as needed.
+If you supply credentials, they're used for **read-only** enumeration only.
+The `vuln` NSE category it runs *reports* likely CVEs from service versions —
+it does not confirm or trigger them.
 
-## Network-scan decision tree (`modules/network_scan.py`)
+---
 
-This is the one phase built as an actual branching tree rather than a
-fixed sequence, because port-scan results legitimately change what you
-should do next:
+## Requirements
 
-1. **Host discovery** (`nmap -sn`). If no response, don't conclude the
-   host is down — many real hosts drop ICMP. Instead, force `-Pn` on
-   every subsequent step and note that in the manifest.
-2. **Quick scan** (`nmap -F -T4`, top 100 ports) — fast signal before
-   committing to anything expensive.
-3. **Branch:** if any ports came back `filtered`, that's a firewall/IDS
-   signal. Run four evasion techniques and save each to its own file
-   so a human can see which one (if any) got through:
-   - packet fragmentation (`-f`)
-   - decoy scanning (`-D RND:10`)
-   - source-port spoofing (`--source-port 53`)
-   - ACK scan to map the firewall ruleset itself (`-sA`)
-4. **Deep scan** (`-sV -sC`) runs only against ports confirmed `open`
-   in step 2 — not a blind full-range sweep. (A full `-p-` sweep is
-   intentionally *not* run by default; it's slow and low-yield once
-   you've already evasion-tested the fast scan. Add it as an explicit
-   opt-in later if needed.)
+- **Docker.** Everything (nmap, the ProjectDiscovery tools, the service-enum
+  clients, SecLists) is baked into the image — nothing to install on the host.
+- **Capabilities** for the full feature set: `NET_RAW` + `NET_ADMIN` (raw-socket
+  scans/evasion) and `SYS_ADMIN` (read-only NFS mount). See [Quick
+  start](#quick-start).
 
-## Execution layer (`modules/executor.py`)
+### Building
 
-Every external tool call goes through `run_tool()`, which guarantees:
-- missing binaries are caught and logged, never crash the run
-- timeouts are enforced per tool (configured in `config/settings.py`)
-- raw stdout/stderr is written to disk
-- a structured `ToolResult` is returned so calling code can branch on
-  what happened, without re-parsing files from disk
+```bash
+git clone https://github.com/hafizfarhad/reconbox.git && cd reconbox
+docker build -t reconbox .
+```
 
-This is the seam that keeps the decision tree reliable — a single
-choke point for "what do we do when a tool misbehaves," instead of
-handling it ad hoc in every phase.
+Heavy first build (Kali base + Go tools + SecLists) — expect 15–30 min.
+
+---
 
 ## Extending
 
-- **New tool in an existing phase**: add a `run_tool(...)` call in the
-  relevant `modules/*.py` file, add the binary name to
-  `REQUIRED_TOOLS` in `config/settings.py`, add the install step to
-  the `Dockerfile` if it's not on Kali by default.
-- **New phase**: create `modules/new_phase.py` following the same
-  pattern (`run_<phase>(target, phase_dir, error_log) -> summary dict`),
-  wire it into `brain.py`, add its directory to `build_dirs()`.
-- **LLM synthesis stage (planned, not built yet)**: should read
-  `meta/run_manifest.json` for structure + status, then read the raw
-  files it references for content. The manifest is the index; the
-  phase folders are the evidence.
+The code is small and each piece is self-contained:
 
-## What this does NOT do
+- **New service enumerator** → add `modules/services/<svc>.py` with a
+  `@register("<key>")` handler, import it in `modules/services/__init__.py`,
+  and map the service in `SERVICE_ALIASES` / `STANDARD_PORT_MAP`.
+- **New config option** → append one entry to `CONFIG_QUESTIONS` in
+  `modules/config_wizard.py` (both env-var and wizard pick it up).
+- **New phase** → a `run_<phase>(target, phase_dir, error_log, config)` in
+  `modules/`, wired into `brain.py`.
 
-- No active exploitation or vulnerability confirmation — recon only.
-- No automatic scope expansion beyond the given target (no walking out
-  to unrelated subdomains/orgs without being told to).
-- No authorization/legality check — this container assumes whoever
-  runs it already has permission to test the given target. That check
-  belongs one layer up, outside this container.
+Every external command goes through `modules/executor.py:run_tool()` — the
+single choke point that handles timeouts, missing binaries, raw output
+capture, secret redaction, and progress reporting.
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 Hafiz Farhad

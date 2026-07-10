@@ -21,10 +21,15 @@ import time
 import shutil
 
 from config.settings import ALL_TOOLS, OUTPUT_ROOT
+from modules import progress
+from modules.executor import register_secret
 from modules.resolver import resolve_target
+from modules.config_wizard import load_config, redact_for_manifest
 from modules.network_scan import run_network_scan
+from modules.service_enum import run_service_enum
 from modules.dns_recon import run_dns_recon
 from modules.web_recon import run_web_recon
+from modules.osint import run_osint
 
 
 def check_tools():
@@ -44,8 +49,10 @@ def build_dirs(label):
         "base": base,
         "meta": os.path.join(base, "meta"),
         "network-scan": os.path.join(base, "network-scan"),
+        "service-enum": os.path.join(base, "service-enum"),
         "dns-recon": os.path.join(base, "dns-recon"),
         "web-recon": os.path.join(base, "web-recon"),
+        "osint": os.path.join(base, "osint"),
     }
     for d in dirs.values():
         os.makedirs(d, exist_ok=True)
@@ -60,12 +67,27 @@ def main():
     raw_input = sys.argv[1]
     run_started = time.strftime("%Y-%m-%d %H:%M:%S")
 
-    error_log_tmp = None  # set after we know the label
     missing_tools = check_tools()
+
+    # Optional launch-time configuration (interactive only on a TTY; otherwise
+    # driven purely by env vars / defaults so headless runs never block).
+    config = load_config()
+
+    # Mask supplied secrets everywhere the executor serializes a command or its
+    # output (per-service files, errors.log, container log).
+    for _secret_key in ("password", "shodan_api_key"):
+        register_secret(config.get(_secret_key))
 
     target = resolve_target(raw_input)
     dirs = build_dirs(target.label)
     error_log = os.path.join(dirs["meta"], "errors.log")
+
+    # Resolution runs before the error_log path is known (the path depends on
+    # the resolved label), so any resolver-stage errors were buffered on the
+    # target. Flush them now that errors.log exists.
+    for message in target.log_messages:
+        with open(error_log, "a") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {message}\n")
 
     # Write target/meta info first, so even a crash mid-run leaves a trace
     target_info = {
@@ -77,6 +99,7 @@ def main():
         "ptr_note": target.ptr_note,
         "run_started": run_started,
         "missing_tools_at_startup": missing_tools,
+        "run_config": redact_for_manifest(config),
     }
     with open(os.path.join(dirs["meta"], "target_info.json"), "w") as f:
         json.dump(target_info, f, indent=2)
@@ -87,29 +110,49 @@ def main():
 
     manifest = {"target": target_info, "phases": []}
 
+    # Declare the phase plan up front so progress can show "phase i/N".
+    phase_plan = ["network-scan", "service-enum"]
+    if target.is_domain_target:
+        phase_plan += ["dns-recon", "web-recon", "osint"]
+    progress.configure(phase_plan)
+
     # ---- Phase 1: network-scan (always runs) ------------------------------
-    print("[*] Running network-scan phase...")
-    net_summary = run_network_scan(target, dirs["network-scan"], error_log)
+    progress.start_phase("network-scan")
+    net_summary = run_network_scan(target, dirs["network-scan"], error_log, config)
     manifest["phases"].append(net_summary)
 
-    # ---- Phase 2 & 3: domain-only phases -----------------------------------
+    # ---- Phase 2: service-enum (always runs; port-driven) -----------------
+    progress.start_phase("service-enum")
+    svc_summary = run_service_enum(target, dirs["service-enum"], error_log, config, net_summary)
+    manifest["phases"].append(svc_summary)
+    if not svc_summary.get("enumerated"):
+        # No open port mapped to an enumerator -- drop the empty directory.
+        shutil.rmtree(dirs["service-enum"], ignore_errors=True)
+
+    # ---- Phase 3, 4 & 5: domain-only phases --------------------------------
     if target.is_domain_target:
-        print("[*] Running dns-recon phase...")
-        dns_summary = run_dns_recon(target, dirs["dns-recon"], error_log)
+        progress.start_phase("dns-recon")
+        dns_summary = run_dns_recon(target, dirs["dns-recon"], error_log, config)
         manifest["phases"].append(dns_summary)
 
-        print("[*] Running web-recon phase...")
+        progress.start_phase("web-recon")
         web_summary = run_web_recon(target, dirs["web-recon"], error_log)
         manifest["phases"].append(web_summary)
+
+        progress.start_phase("osint")
+        osint_summary = run_osint(target, dirs["osint"], error_log, config)
+        manifest["phases"].append(osint_summary)
     else:
-        print("[*] Skipping dns-recon / web-recon -- target classified as IP-only.")
+        print("[*] Skipping dns-recon / web-recon / osint -- target classified as IP-only.")
         shutil.rmtree(dirs["dns-recon"], ignore_errors=True)
         shutil.rmtree(dirs["web-recon"], ignore_errors=True)
+        shutil.rmtree(dirs["osint"], ignore_errors=True)
 
     manifest["run_finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
     with open(os.path.join(dirs["meta"], "run_manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
 
+    progress.finish()
     print(f"[*] Done. Output written to {dirs['base']}")
 
 

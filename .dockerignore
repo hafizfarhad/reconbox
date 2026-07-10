@@ -1,0 +1,13 @@
+# Keep the build context small and free of scan results / secrets.
+output/
+.git/
+.github/
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+*.md
+!README.md
+.DS_Store

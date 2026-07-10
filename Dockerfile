@@ -1,13 +1,16 @@
 FROM kalilinux/kali-rolling:latest
 
 # ---------------------------------------------------------------------------
-# System tools: nmap, whois, dig (dnsutils), whatweb, python3, go (needed to
-# build the ProjectDiscovery tools below), git.
+# System tools: nmap (+ncat for evasion connect-verification), xsltproc
+# (nmap XML -> HTML reports), whois, dig (dnsutils), whatweb, python3, go
+# (needed to build the ProjectDiscovery tools below), git.
 # Most of these already ship on Kali -- apt install is idempotent, so this
 # is just a safety net if the base image slims down in future.
 # ---------------------------------------------------------------------------
 RUN apt-get update && apt-get install -y --no-install-recommends \
     nmap \
+    ncat \
+    xsltproc \
     whois \
     dnsutils \
     whatweb \
@@ -15,7 +18,40 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     golang-go \
     git \
+    curl \
+    jq \
+    openssl \
     ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# Service-enumeration tooling (balanced set): native protocol clients + a few
+# focused frameworks. nmap NSE covers the rest. SecLists provides the bundled
+# wordlists for subdomain / SNMP-community enumeration.
+#   - smbclient / samba-common-bin -> smbclient, rpcclient
+#   - smbmap, enum4linux-ng        -> SMB enumeration
+#   - nfs-common                   -> showmount, mount.nfs
+#   - rsync, snmp, onesixtyone, braa, ssh-audit
+#   - mariadb-client               -> mysql
+#   - netexec                      -> nxc (authenticated WinRM/SMB checks)
+#   - python3-impacket             -> impacket-rpcdump (MSRPC enumeration)
+#   - seclists                     -> /usr/share/seclists
+# ---------------------------------------------------------------------------
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    smbclient \
+    samba-common-bin \
+    smbmap \
+    enum4linux-ng \
+    nfs-common \
+    rsync \
+    snmp \
+    onesixtyone \
+    braa \
+    ssh-audit \
+    mariadb-client \
+    netexec \
+    python3-impacket \
+    seclists \
     && rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------
@@ -24,6 +60,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # ---------------------------------------------------------------------------
 ENV GOPATH=/root/go
 ENV PATH=$PATH:/root/go/bin
+# Unbuffered stdout so the live progress heartbeat shows up immediately in
+# `docker run` / `docker logs -f` instead of being block-buffered.
+ENV PYTHONUNBUFFERED=1
 
 RUN go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest && \
     go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest && \
