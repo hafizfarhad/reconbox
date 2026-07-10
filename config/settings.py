@@ -22,7 +22,7 @@ import re
 REQUIRED_TOOLS = {
     "network-scan": ["nmap", "xsltproc", "ncat"],
     "dns-recon": ["whois", "dig", "subfinder", "dnsx"],
-    "web-recon": ["httpx", "whatweb", "katana", "gau"],
+    "web-recon": ["httpx", "whatweb", "katana", "gau", "ffuf"],
     # Service enumeration. nmap is the hard requirement; the rest are
     # per-service native clients that degrade gracefully via run_tool().
     "service-enum": [
@@ -109,6 +109,7 @@ TIMEOUTS.update({
     "subdomain_brute": 900,
     "crtsh": 60,
     "shodan": 60,
+    "ffuf": 900,            # web content discovery — bounded but generous
 })
 
 # Map nmap-detected service names to a canonical handler key. Dispatch prefers
@@ -183,6 +184,12 @@ DEFAULT_SUBDOMAIN_WORDLIST = os.path.join(
     SECLISTS_ROOT, "Discovery", "DNS", "subdomains-top1million-20000.txt")
 DEFAULT_SNMP_WORDLIST = os.path.join(
     SECLISTS_ROOT, "Discovery", "SNMP", "snmp.txt")
+# Web content discovery (ffuf). common.txt is a fast, high-ROI default; point
+# RECONBOX_FFUF_WORDLIST at a bigger list (e.g. raft-medium-directories.txt)
+# for deeper coverage. Extensions are appended to each candidate.
+DEFAULT_FFUF_WORDLIST = os.path.join(
+    SECLISTS_ROOT, "Discovery", "Web-Content", "common.txt")
+FFUF_EXTENSIONS = os.environ.get("RECONBOX_FFUF_EXTENSIONS", ".php,.html,.txt")
 
 # Upper bound on candidates fed to the dnsx-based subdomain brute, so a huge
 # wordlist doesn't blow past the phase timeout. Configurable via env.

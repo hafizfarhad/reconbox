@@ -1,0 +1,6 @@
+# Python dependencies for the report phase (modules/report.py).
+# In the Docker image these are installed via apt (python3-weasyprint,
+# python3-jinja2) to avoid PEP-668 issues and pull the right Pango/Cairo
+# system libraries. This file is for running reconbox outside the container.
+weasyprint>=60
+jinja2>=3.1

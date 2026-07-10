@@ -52,7 +52,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     netexec \
     python3-impacket \
     seclists \
+    python3-jinja2 \
+    fonts-dejavu-core \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libgdk-pixbuf-2.0-0 \
+    libcairo2 \
+    shared-mime-info \
     && rm -rf /var/lib/apt/lists/*
+
+# WeasyPrint (the report PDF engine) is not packaged for Kali, so install it
+# via pip. Its Pango/Cairo/gdk-pixbuf runtime libraries are the apt packages
+# above; jinja2 comes from python3-jinja2.
+RUN pip3 install --no-cache-dir --break-system-packages weasyprint
 
 # ---------------------------------------------------------------------------
 # ProjectDiscovery tools + gau are Go tools, not guaranteed to be on a slim
@@ -64,7 +76,8 @@ ENV PATH=$PATH:/root/go/bin
 # `docker run` / `docker logs -f` instead of being block-buffered.
 ENV PYTHONUNBUFFERED=1
 
-RUN go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest && \
+RUN go install -v github.com/ffuf/ffuf/v2@latest && \
+    go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest && \
     go install -v github.com/projectdiscovery/dnsx/cmd/dnsx@latest && \
     go install -v github.com/projectdiscovery/httpx/cmd/httpx@latest && \
     go install -v github.com/projectdiscovery/katana/cmd/katana@latest && \

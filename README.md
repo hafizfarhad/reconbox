@@ -2,8 +2,8 @@
 
 A single-command reconnaissance container. Point it at one domain or IP and
 it runs the full **recon → footprinting → vulnerability-assessment** arc —
-port scanning, per-service enumeration, DNS, and passive OSINT — then drops a
-structured, per-phase evidence directory plus a machine-readable manifest.
+port scanning, per-service enumeration, DNS, and passive OSINT — then folds
+everything into one clean **`report.pdf`**.
 
 **It does not exploit.** No password brute-forcing, no remote command
 execution, no writes to the target. It maps the attack surface and flags
@@ -30,8 +30,9 @@ mkdir -p output
 docker run --rm -v "$(pwd)/output:/output" hafizfarhad/reconbox scanme.nmap.org
 ```
 
-Results land in `./output/<target>/`. A full run is thorough and can take a
-while — watch the [live progress](#watching-progress) to see where it's at.
+The result is a clean **`report.pdf`** in `./output/<target>/`. A full run is
+thorough and can take a while — watch the [live progress](#watching-progress)
+to see where it's at.
 
 For the raw-socket features (SYN/UDP/OS scans, evasion, NFS mount) grant the
 extra capabilities:
@@ -54,8 +55,9 @@ Without them nothing crashes — those steps are skipped and noted.
 | **network-scan** | always | Host discovery, port scan (SYN as root, else Connect), full `-p-` sweep, UDP scan, firewall detection (ACK), adaptive evasion, service/OS/version deep scan, `vuln` NSE scripts, HTML reports. |
 | **service-enum** | always | Enumerates every open service in depth — FTP, SMB, NFS, Rsync, SMTP, IMAP/POP3, DNS, SNMP, MySQL, MSSQL, Oracle, SSH, RDP, WinRM, WMI, R-services, IPMI, TFTP. |
 | **dns-recon** | domains | whois, `dig` records, subfinder/dnsx, `ANY`, per-nameserver AXFR + `version.bind`, subdomain brute-force. |
-| **web-recon** | domains | httpx, whatweb, katana crawl, gau (archived URLs). |
+| **web-recon** | domains | httpx, whatweb, katana crawl, gau (archived URLs), ffuf content discovery (dirs + files). |
 | **osint** | domains | crt.sh certificate transparency, TLS certificate SANs, optional Shodan lookup. |
+| **report** | always | Parses everything into a single clean **`report.pdf`** (WeasyPrint) — findings tables + full formatted evidence. |
 
 **network-scan is a decision tree, not a fixed list** — evasion only fires
 when a firewall is detected, the deep scan only targets confirmed-open ports,
@@ -70,12 +72,12 @@ The container prints a live heartbeat (names, counts, timings — never tool
 output) so you can gauge how much longer to wait:
 
 ```
-[00:00] Phase 1/5 · network-scan
+[00:00] Phase 1/6 · network-scan
 [00:02]   ✓ nmap-host-discovery (2.1s, exit 0) · 1 steps done
-[03:20] Phase 2/5 · service-enum
+[03:20] Phase 2/6 · service-enum
 [03:20]   [1/8] smb (445/tcp)
 [03:20]     ▶ nse-smb-445 …
-[19:40] Done · 63 tool runs across 5 phase(s) · total 19:40
+[19:40] Done · 63 tool runs across 6 phase(s) · total 19:40
 ```
 
 Running detached? Follow it with `docker logs -f <container>`.
@@ -104,8 +106,10 @@ through them. Just press Enter to accept defaults.
 | `RECONBOX_SHODAN_KEY` | Enables the Shodan lookup | skipped |
 | `RECONBOX_SOURCE_IP` / `RECONBOX_INTERFACE` / `RECONBOX_DNS_SERVER` | Evasion (off unless set) | off |
 | `RECONBOX_SOURCE_PORT` / `RECONBOX_DECOY_COUNT` | Evasion tuning | `53` / `10` |
-| `RECONBOX_SUBDOMAIN_WORDLIST` / `RECONBOX_SNMP_WORDLIST` | Wordlists (SecLists bundled) | SecLists |
+| `RECONBOX_SUBDOMAIN_WORDLIST` / `RECONBOX_SNMP_WORDLIST` / `RECONBOX_FFUF_WORDLIST` | Wordlists (SecLists bundled) | SecLists |
+| `RECONBOX_FFUF_EXTENSIONS` | Extensions ffuf appends to each candidate | `.php,.html,.txt` |
 | `RECONBOX_SUBDOMAIN_MAX` | Cap on subdomain brute candidates | `20000` |
+| `RECONBOX_KEEP_RAW=1` | Keep raw phase folders (default: deleted after the PDF) | delete |
 | `RECONBOX_CONFIGURE=1` / `RECONBOX_NO_PROMPT=1` | Force the wizard on / off | — |
 
 ```bash
@@ -131,22 +135,35 @@ docker run --rm \
 
 ## Output layout
 
+By default the run is **PDF-only** — once `report.pdf` is written, the raw
+phase folders are deleted (everything worth keeping is in the PDF):
+
 ```
 output/<target>/
-├── meta/
-│   ├── target_info.json    # how the input was classified + run config (secrets masked)
-│   ├── run_manifest.json    # index of every step, per phase, with status
-│   └── errors.log           # missing tools / timeouts / non-zero exits
-├── network-scan/            # nmap .nmap/.gnmap/.xml per step + html/ reports
-├── service-enum/            # per-service evidence (nse + native-tool output)
-├── dns-recon/               # domains only
-├── web-recon/               # domains only
-└── osint/                   # domains only
+├── report.pdf              # the deliverable — findings tables + full evidence
+├── report.html             # same report, pre-conversion
+└── meta/
+    ├── target_info.json    # input classification + run config (secrets masked)
+    ├── run_manifest.json    # index of every step, per phase, with status
+    └── errors.log           # missing tools / timeouts / non-zero exits
 ```
 
-`run_manifest.json` is the index; the phase folders are the evidence.
-network-scan uses nmap's native multi-format output (and renders each XML to
-HTML via `xsltproc`); the other phases keep raw tool output untouched.
+Two safety rules: the raw folders are **only** removed after the PDF is
+successfully generated (if WeasyPrint fails, the raw evidence is kept so you
+still have results), and you can keep everything with **`RECONBOX_KEEP_RAW=1`**:
+
+```
+output/<target>/
+├── report.pdf
+├── meta/ …
+├── network-scan/            # nmap .nmap/.gnmap/.xml per step + html/ reports
+├── service-enum/            # per-service evidence
+├── dns-recon/ web-recon/ osint/   # domains only
+```
+
+The PDF opens with an executive summary, then per-phase findings tables
+(ports/services/versions, CVEs, DNS/subdomains, SMB shares & users, evasion
+results …) followed by the full, formatted tool output so nothing is lost.
 
 ---
 

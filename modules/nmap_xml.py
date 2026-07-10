@@ -19,12 +19,15 @@ class NmapScan:
     """Parsed view of a single nmap XML file."""
 
     def __init__(self, host_up=False, host_reason=None, ports=None,
-                 os_matches=None, parse_error=None):
+                 os_matches=None, parse_error=None,
+                 port_scripts=None, host_scripts=None):
         self.host_up = host_up
         self.host_reason = host_reason        # e.g. "arp-response", "echo-reply", "user-set"
         self.ports = ports or {}              # {"22/tcp": {state, reason, service, product, version}}
         self.os_matches = os_matches or []    # [{"name": ..., "accuracy": ...}]
         self.parse_error = parse_error        # str if the file was unreadable/partial
+        self.port_scripts = port_scripts or {}   # {"80/tcp": [{"id":..., "output":...}]}
+        self.host_scripts = host_scripts or []   # [{"id":..., "output":...}] (host-level NSE)
 
     def ports_in_state(self, *states):
         """Port keys (e.g. '22/tcp') whose state is one of `states`."""
@@ -77,6 +80,8 @@ def parse_scan(xml_path):
     host_reason = None
     ports = {}
     os_matches = []
+    port_scripts = {}
+    host_scripts = []
 
     host = root.find("host")
     if host is not None:
@@ -90,6 +95,7 @@ def parse_scan(xml_path):
             proto = port.get("protocol")
             if not portid or not proto:
                 continue
+            key = f"{portid}/{proto}"
             state_el = port.find("state")
             svc_el = port.find("service")
             state = state_el.get("state") if state_el is not None else "unknown"
@@ -100,7 +106,11 @@ def parse_scan(xml_path):
                 entry["service"] = svc_el.get("name")
                 entry["product"] = svc_el.get("product")
                 entry["version"] = svc_el.get("version")
-            ports[f"{portid}/{proto}"] = entry
+            ports[key] = entry
+
+            scripts = _scripts(port)
+            if scripts:
+                port_scripts[key] = scripts
 
         for osmatch in host.findall("./os/osmatch"):
             os_matches.append({
@@ -108,5 +118,21 @@ def parse_scan(xml_path):
                 "accuracy": osmatch.get("accuracy"),
             })
 
+        host_scripts = _scripts(host.find("hostscript")) if host.find("hostscript") is not None else []
+
     return NmapScan(host_up=host_up, host_reason=host_reason, ports=ports,
-                    os_matches=os_matches, parse_error=err)
+                    os_matches=os_matches, parse_error=err,
+                    port_scripts=port_scripts, host_scripts=host_scripts)
+
+
+def _scripts(parent):
+    """Extract [{id, output}] from an element's direct <script> children."""
+    out = []
+    if parent is None:
+        return out
+    for script in parent.findall("script"):
+        sid = script.get("id")
+        output = script.get("output") or ""
+        if sid:
+            out.append({"id": sid, "output": output})
+    return out

@@ -26,7 +26,7 @@ import sys
 
 from config.settings import (
     EVASION_SOURCE_PORT, DECOY_COUNT,
-    DEFAULT_SUBDOMAIN_WORDLIST, DEFAULT_SNMP_WORDLIST,
+    DEFAULT_SUBDOMAIN_WORDLIST, DEFAULT_SNMP_WORDLIST, DEFAULT_FFUF_WORDLIST,
 )
 
 
@@ -128,6 +128,13 @@ CONFIG_QUESTIONS = [
         "env": "RECONBOX_SNMP_WORDLIST",
         "prompt": "SNMP community-string wordlist path",
         "default": DEFAULT_SNMP_WORDLIST,
+        "validate": lambda v: True,
+    },
+    {
+        "key": "ffuf_wordlist",
+        "env": "RECONBOX_FFUF_WORDLIST",
+        "prompt": "Web content-discovery (ffuf) wordlist path",
+        "default": DEFAULT_FFUF_WORDLIST,
         "validate": lambda v: True,
     },
 ]

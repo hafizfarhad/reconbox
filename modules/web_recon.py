@@ -6,11 +6,12 @@ Web-recon phase. Only runs when target.is_domain_target is True
 import os
 
 from modules.executor import run_tool
-from config.settings import TIMEOUTS
+from config.settings import TIMEOUTS, DEFAULT_FFUF_WORDLIST, FFUF_EXTENSIONS
 
 
-def run_web_recon(target, phase_dir, error_log):
+def run_web_recon(target, phase_dir, error_log, config=None):
     os.makedirs(phase_dir, exist_ok=True)
+    config = config or {}
     domain = target.domain
     summary = {"phase": "web-recon", "steps": []}
 
@@ -59,5 +60,31 @@ def run_web_recon(target, phase_dir, error_log):
         error_log=error_log,
     )
     summary["steps"].append({"step": "gau", "result": repr(gau_result)})
+
+    # ---- ffuf: active content discovery (dirs + files) ---------------------
+    # Read-only GET brute-force. -ac auto-calibrates against wildcard responses
+    # to cut false positives; JSON goes to its own file, readable results to
+    # stdout capture. Loud but non-exploitative.
+    wordlist = config.get("ffuf_wordlist") or DEFAULT_FFUF_WORDLIST
+    if os.path.isfile(wordlist):
+        ffuf_json = os.path.join(phase_dir, "05_ffuf.json")
+        ffuf_result = run_tool(
+            "ffuf",
+            ["ffuf", "-u", f"{url.rstrip('/')}/FUZZ", "-w", wordlist,
+             "-e", FFUF_EXTENSIONS,
+             "-mc", "200,204,301,302,307,401,403,405",
+             "-ac", "-t", "40", "-timeout", "10",
+             "-o", ffuf_json, "-of", "json", "-s"],
+            output_path=os.path.join(phase_dir, "05_ffuf_content.txt"),
+            timeout=TIMEOUTS["ffuf"],
+            error_log=error_log,
+        )
+        summary["steps"].append({"step": "ffuf", "result": repr(ffuf_result),
+                                 "wordlist": wordlist})
+    else:
+        summary["steps"].append({
+            "step": "ffuf",
+            "detail": f"Skipped -- wordlist not found: {wordlist}",
+        })
 
     return summary

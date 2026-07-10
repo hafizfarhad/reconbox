@@ -30,6 +30,7 @@ from modules.service_enum import run_service_enum
 from modules.dns_recon import run_dns_recon
 from modules.web_recon import run_web_recon
 from modules.osint import run_osint
+from modules.report import generate_report
 
 
 def check_tools():
@@ -114,6 +115,7 @@ def main():
     phase_plan = ["network-scan", "service-enum"]
     if target.is_domain_target:
         phase_plan += ["dns-recon", "web-recon", "osint"]
+    phase_plan.append("report")
     progress.configure(phase_plan)
 
     # ---- Phase 1: network-scan (always runs) ------------------------------
@@ -136,7 +138,7 @@ def main():
         manifest["phases"].append(dns_summary)
 
         progress.start_phase("web-recon")
-        web_summary = run_web_recon(target, dirs["web-recon"], error_log)
+        web_summary = run_web_recon(target, dirs["web-recon"], error_log, config)
         manifest["phases"].append(web_summary)
 
         progress.start_phase("osint")
@@ -149,8 +151,25 @@ def main():
         shutil.rmtree(dirs["osint"], ignore_errors=True)
 
     manifest["run_finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    # ---- Final phase: build the PDF report from everything collected -------
+    progress.start_phase("report")
+    report_summary = generate_report(target, dirs, manifest, config, error_log)
+    manifest["phases"].append(report_summary)
+
     with open(os.path.join(dirs["meta"], "run_manifest.json"), "w") as f:
         json.dump(manifest, f, indent=2)
+
+    # PDF-only mode: once the PDF is safely written, drop the raw evidence
+    # folders (keep meta/ + report.pdf). Never delete if the PDF failed, or if
+    # the operator asked to keep raw.
+    keep_raw = os.environ.get("RECONBOX_KEEP_RAW") == "1"
+    if report_summary.get("pdf_ok") and not keep_raw:
+        for key in ("network-scan", "service-enum", "dns-recon", "web-recon", "osint"):
+            shutil.rmtree(dirs[key], ignore_errors=True)
+        print("[*] Raw evidence removed (PDF-only mode). Set RECONBOX_KEEP_RAW=1 to keep it.")
+    elif not report_summary.get("pdf_ok"):
+        print(f"[!] PDF not generated ({report_summary.get('error')}); raw evidence kept.")
 
     progress.finish()
     print(f"[*] Done. Output written to {dirs['base']}")
