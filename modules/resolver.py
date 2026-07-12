@@ -12,9 +12,25 @@ Logic agreed on:
 """
 
 import ipaddress
+import re
 import socket
 
 from config.settings import CLOUD_PTR_PATTERNS
+
+# A syntactically valid DNS hostname: dot-separated labels of letters/digits/
+# hyphens (no leading/trailing hyphen per label), total length <= 253, optional
+# trailing dot. Critically this rejects any value beginning with '-', so a
+# target -- or an attacker-controlled PTR record -- can never smuggle a leading
+# dash into a tool's argv and be parsed as a flag (argument injection).
+_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}\.?$)"
+    r"(?!-)[A-Za-z0-9-]{1,63}(?<!-)"
+    r"(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*\.?$"
+)
+
+
+def _valid_hostname(value):
+    return bool(value) and bool(_HOSTNAME_RE.match(value))
 
 
 class Target:
@@ -58,8 +74,17 @@ def resolve_target(raw_input):
 
     if _is_ip(raw_input):
         return _resolve_from_ip(raw_input)
-    else:
-        return _resolve_from_domain(raw_input)
+
+    # Not an IP -- it must be a syntactically valid hostname. Rejecting here
+    # (rather than trusting the operator) closes argument injection: the raw
+    # value flows into many tools' argv (nmap/dig/whois/gau/service clients),
+    # and a value like "-oX/etc/x" or "$(...)" must never reach them.
+    if not _valid_hostname(raw_input):
+        raise ValueError(
+            f"Invalid target '{raw_input}': not a valid IP address or hostname. "
+            f"Provide a single domain (e.g. example.com) or IP (e.g. 10.0.0.1)."
+        )
+    return _resolve_from_domain(raw_input)
 
 
 def _resolve_from_domain(domain):
@@ -106,6 +131,20 @@ def _resolve_from_ip(ip):
             ptr_hostname=ptr_hostname,
             ptr_note=(f"PTR '{ptr_hostname}' matches a cloud-provider auto-generated "
                        f"pattern. Treating as network IP target only, skipping domain tools."),
+        )
+
+    # The PTR record is controlled by the target's owner, i.e. untrusted input.
+    # If it isn't a syntactically valid hostname, do NOT promote it to a domain
+    # (which would feed it to whois/dig/gau/etc.) -- fall back to IP-only.
+    if not _valid_hostname(ptr_hostname):
+        return Target(
+            raw_input=ip,
+            domain=None,
+            ip=ip,
+            is_domain_target=False,
+            ptr_hostname=ptr_hostname,
+            ptr_note=(f"PTR '{ptr_hostname}' is not a valid hostname; not trusting it "
+                       f"as a domain. Treating as network IP target only."),
         )
 
     # PTR exists and doesn't look auto-generated -> treat as a real domain too

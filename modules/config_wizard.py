@@ -140,10 +140,22 @@ CONFIG_QUESTIONS = [
 ]
 
 
+# Fallback values for the integer options, used when an env var holds a
+# non-integer (the interactive path pre-validates with _is_int, but env vars
+# bypass that check).
+_DEFAULT_INTS = {"source_port": EVASION_SOURCE_PORT, "decoy_count": DECOY_COUNT}
+
+
 def _coerce(key, value):
     """Normalize a few values to their runtime type."""
     if key in ("source_port", "decoy_count") and value not in (None, ""):
-        return int(value)
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            # e.g. RECONBOX_SOURCE_PORT=abc -- fall back to the default rather
+            # than raising an unhandled ValueError that aborts the whole run
+            # before any scanning happens.
+            return int(_DEFAULT_INTS[key])
     return value or None  # empty string -> None (feature simply off)
 
 

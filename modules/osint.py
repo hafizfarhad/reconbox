@@ -51,7 +51,10 @@ def _crtsh(domain, phase_dir, error_log, summary):
                 # json.loads has already turned those into real newlines.
                 for name in val.split("\n"):
                     name = name.strip().lstrip("*.").lower()
-                    if name.endswith(domain):
+                    # Exact match or a real sub-label only. A bare endswith()
+                    # would wrongly claim sibling domains like "evilkeenu.pk"
+                    # as subdomains of "keenu.pk".
+                    if name == domain or name.endswith("." + domain):
                         subs.add(name)
     except (ValueError, AttributeError, TypeError):
         pass

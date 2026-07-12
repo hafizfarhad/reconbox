@@ -22,8 +22,26 @@ def enum_wmi(ctx):
             u = ctx.creds["username"]
             p = ctx.creds["password"] or ""
             dom = ctx.creds["domain"] or ""
-            prefix = f"{dom}/" if dom else ""
-            target = f"{prefix}{u}:{p}@{ctx.host}"
+            # impacket parses the inline "domain/user:password@host" target by
+            # splitting on '/', ':' and '@' with NO escaping mechanism, so these
+            # characters in a credential would silently mis-parse and auth as the
+            # wrong principal. '@' or '/' anywhere, or ':' in the username/domain,
+            # are unrepresentable -- fall back to an unauthenticated rpcdump
+            # rather than authenticate incorrectly. ('/' allowed in password.)
+            unsafe = (any(c in u for c in "@/:")
+                      or any(c in dom for c in "@/:")
+                      or "@" in p)
+            if unsafe:
+                steps.append({"rpcdump_auth_note":
+                              "credential contains a character impacket's inline "
+                              "target syntax cannot escape (@ / : in user/domain, "
+                              "or @ in password) -- running unauthenticated rpcdump."})
+            else:
+                prefix = f"{dom}/" if dom else ""
+                # NOTE: impacket-rpcdump encodes the password in the connection
+                # string on argv (visible via `ps`); it has no off-argv option
+                # that works non-interactively. Still redacted in on-disk output.
+                target = f"{prefix}{u}:{p}@{ctx.host}"
         steps.append({"rpcdump": repr(run_native(
             ctx, "impacket-rpcdump", ["impacket-rpcdump", target],
             f"{ctx.port}_msrpc_rpcdump.txt"))})

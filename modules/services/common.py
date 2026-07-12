@@ -13,14 +13,52 @@ executor's raw stdout capture. Nothing here writes to the target — every
 action is read-only enumeration.
 """
 
+import contextlib
+import ipaddress
 import os
 import socket
+import tempfile
 
 from modules.executor import run_tool, tool_available
 from config.settings import TIMEOUTS
 
 # canonical service key -> handler function
 HANDLERS = {}
+
+
+def _is_ipv6(host):
+    """True only for a literal IPv6 address (hostnames/IPv4 -> False)."""
+    try:
+        return ipaddress.ip_address(host).version == 6
+    except ValueError:
+        return False
+
+
+def nse_base_cmd(ctx, scripts):
+    """
+    Shared nmap command prefix for NSE service handlers.
+
+    - -Pn: we already know this port is open (the network-scan phase confirmed
+      it), so host discovery must be skipped. Without it, a host that drops
+      ICMP is judged "down" and nmap runs NONE of the scripts -- a silent,
+      total loss of service enumeration on firewalled hosts.
+    - -6: nmap requires it for an IPv6 target, else the scan errors out.
+    """
+    cmd = ["nmap", "-Pn", "-sV", "-p", ctx.port, "--script", scripts]
+    if _is_ipv6(ctx.host):
+        cmd.insert(1, "-6")
+    return cmd
+
+
+def curl_config_value(s):
+    r"""
+    Escape a username/password for use inside a double-quoted curl --config
+    value. curl treats \" and \\ as escapes within quotes, so an unescaped
+    quote or backslash in a credential would truncate/corrupt the value (and
+    could cause a wrong-credential auth). Returns the escaped inner text only
+    (caller supplies the surrounding quotes).
+    """
+    return (s or "").replace("\\", "\\\\").replace('"', '\\"')
 
 
 def register(*names):
@@ -71,7 +109,7 @@ def run_nse(ctx, scripts, timeout=None, extra_args=None):
     -oA output (<port>_<service>_nse.{nmap,gnmap,xml}). Returns a ToolResult.
     """
     base = ctx.out(f"{ctx.port}_{ctx.service}_nse")
-    cmd = ["nmap", "-sV", "-p", ctx.port, "--script", scripts]
+    cmd = nse_base_cmd(ctx, scripts)
     if ctx.proto == "udp":
         cmd.append("-sU")
     if extra_args:
@@ -86,6 +124,29 @@ def run_native(ctx, tool_name, argv, out_name, timeout=None):
     return run_tool(tool_name, argv, output_path=ctx.out(out_name),
                     timeout=timeout or TIMEOUTS["service_native"],
                     error_log=ctx.error_log)
+
+
+@contextlib.contextmanager
+def creds_file(content, prefix="reconbox_", suffix=".conf"):
+    """
+    Write credential material (e.g. a password) to a private, short-lived temp
+    file OUTSIDE /output and yield its path, deleting it in a finally.
+
+    This is the pattern mssql.py already uses, generalized: process argv is
+    world-readable (any local user can read /proc/<pid>/cmdline via `ps`), so a
+    password passed as `-pSECRET` leaks to every process on the host for the
+    tool's lifetime. Tools that can read the credential from a config/auth file
+    (mysql --defaults-extra-file, curl --config, samba -A) keep it off argv
+    entirely; mkstemp creates the file 0600 so only we can read it.
+    """
+    fd, path = tempfile.mkstemp(prefix=prefix, suffix=suffix)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(content)
+        yield path
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
 
 
 def write_text(path, text):

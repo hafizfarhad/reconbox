@@ -18,6 +18,9 @@ def enum_winrm(ctx):
     if ctx.has_creds and tool_available("nxc"):
         u = ctx.creds["username"]
         p = ctx.creds["password"] or ""
+        # NOTE: netexec (nxc) takes the password on argv with no config/env
+        # alternative, so it is visible via `ps` for the run's lifetime. It is
+        # still redacted in the on-disk output by the executor.
         cmd = ["nxc", "winrm", ctx.host, "-u", u, "-p", p]
         if ctx.creds["domain"]:
             cmd += ["-d", ctx.creds["domain"]]

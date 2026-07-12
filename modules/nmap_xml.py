@@ -18,9 +18,12 @@ import xml.etree.ElementTree as ET
 class NmapScan:
     """Parsed view of a single nmap XML file."""
 
+    # States we treat as "filtered" for firewall/evasion decisions.
+    _FILTERED_STATES = ("filtered", "open|filtered", "closed|filtered")
+
     def __init__(self, host_up=False, host_reason=None, ports=None,
                  os_matches=None, parse_error=None,
-                 port_scripts=None, host_scripts=None):
+                 port_scripts=None, host_scripts=None, extra_ports=None):
         self.host_up = host_up
         self.host_reason = host_reason        # e.g. "arp-response", "echo-reply", "user-set"
         self.ports = ports or {}              # {"22/tcp": {state, reason, service, product, version}}
@@ -28,6 +31,11 @@ class NmapScan:
         self.parse_error = parse_error        # str if the file was unreadable/partial
         self.port_scripts = port_scripts or {}   # {"80/tcp": [{"id":..., "output":...}]}
         self.host_scripts = host_scripts or []   # [{"id":..., "output":...}] (host-level NSE)
+        # Aggregate {state: count} from nmap's <extraports> summaries. nmap
+        # collapses large groups of same-state ports (e.g. "Not shown: 100
+        # filtered tcp ports") into a single <extraports> element instead of
+        # listing each <port>, so for those ports this count is the ONLY record.
+        self.extra_ports = extra_ports or {}
 
     def ports_in_state(self, *states):
         """Port keys (e.g. '22/tcp') whose state is one of `states`."""
@@ -40,8 +48,24 @@ class NmapScan:
     @property
     def filtered_ports(self):
         # open|filtered and closed|filtered are ambiguous-but-possibly-blocked;
-        # we treat them as "filtered" for firewall/evasion decisions.
-        return self.ports_in_state("filtered", "open|filtered", "closed|filtered")
+        # we treat them as "filtered" for firewall/evasion decisions. These are
+        # the individually-listed ports only (usable as evasion targets).
+        return self.ports_in_state(*self._FILTERED_STATES)
+
+    def extra_filtered_count(self):
+        """Number of filtered-ish ports that nmap reported only as an
+        <extraports> aggregate (never as individual <port> elements)."""
+        return sum(c for s, c in self.extra_ports.items()
+                   if s in self._FILTERED_STATES)
+
+    @property
+    def filtered_signal(self):
+        """True if ANY port is filtered — whether listed individually or
+        collapsed into an <extraports> summary. Use this (not filtered_ports)
+        to answer 'is a firewall dropping packets?': an ACK scan of a
+        firewalled host reports every filtered port only via <extraports>, so
+        filtered_ports would be empty even though a firewall is clearly present."""
+        return bool(self.filtered_ports) or self.extra_filtered_count() > 0
 
 
 def _read_root(xml_path):
@@ -82,6 +106,7 @@ def parse_scan(xml_path):
     os_matches = []
     port_scripts = {}
     host_scripts = []
+    extra_ports = {}
 
     host = root.find("host")
     if host is not None:
@@ -112,6 +137,21 @@ def parse_scan(xml_path):
             if scripts:
                 port_scripts[key] = scripts
 
+        # <extraports state="filtered" count="100"> — ports nmap did not list
+        # individually. Critical for firewall detection (an ACK scan of a
+        # firewalled host puts ALL filtered ports here and lists none).
+        ports_el = host.find("ports")
+        if ports_el is not None:
+            for ep in ports_el.findall("extraports"):
+                st = ep.get("state")
+                cnt = ep.get("count")
+                if not st or not cnt:
+                    continue
+                try:
+                    extra_ports[st] = extra_ports.get(st, 0) + int(cnt)
+                except (TypeError, ValueError):
+                    pass
+
         for osmatch in host.findall("./os/osmatch"):
             os_matches.append({
                 "name": osmatch.get("name"),
@@ -122,7 +162,8 @@ def parse_scan(xml_path):
 
     return NmapScan(host_up=host_up, host_reason=host_reason, ports=ports,
                     os_matches=os_matches, parse_error=err,
-                    port_scripts=port_scripts, host_scripts=host_scripts)
+                    port_scripts=port_scripts, host_scripts=host_scripts,
+                    extra_ports=extra_ports)
 
 
 def _scripts(parent):

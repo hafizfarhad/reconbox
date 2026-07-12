@@ -16,14 +16,15 @@ import os
 import tempfile
 
 from modules.executor import run_tool
-from modules.services.common import register
+from modules.services.common import register, nse_base_cmd
 from config.settings import NSE_SCRIPTS, TIMEOUTS
 
 
 @register("mssql")
 def enum_mssql(ctx):
     base = ctx.out(f"{ctx.port}_mssql_nse")
-    cmd = ["nmap", "-sV", "-p", ctx.port, "--script", NSE_SCRIPTS["mssql"]]
+    # -Pn (port already known open) + -6 for IPv6 hosts, same as run_nse.
+    cmd = nse_base_cmd(ctx, NSE_SCRIPTS["mssql"])
 
     args_file = None
     if ctx.has_creds:

@@ -73,6 +73,14 @@ FAST_TIMING = "-T4"
 # Minimum packet rate for the full -p- sweep, so it stays bounded without
 # dropping accuracy the way a low --max-retries would.
 FULL_SWEEP_MIN_RATE = 1000
+# The full 1-65535 sweep is split into this many contiguous port-range chunks,
+# each run as its own nmap invocation. nmap only flushes a host's results (and
+# closes </host> in the XML) at host completion, so a single monolithic -p-
+# that hits its timeout yields ZERO parsed ports. Chunking bounds the loss to
+# the one in-progress range; every finished chunk has already written a
+# complete, parseable XML. The per-tool nmap_full timeout is divided across
+# the chunks so the total time budget is unchanged.
+FULL_SWEEP_CHUNKS = 4
 # UDP scan is bounded to the top N ports (a full UDP -p- is impractically slow).
 UDP_TOP_PORTS = 100
 

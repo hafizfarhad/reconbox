@@ -1,0 +1,11 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Scan results (may contain sensitive recon data)
+output/
+
+# Virtualenvs
+.venv/
+venv/

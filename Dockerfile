@@ -71,7 +71,12 @@ RUN pip3 install --no-cache-dir --break-system-packages weasyprint
 # Kali image. Installing explicitly so the container is self-contained.
 # ---------------------------------------------------------------------------
 ENV GOPATH=/root/go
-ENV PATH=$PATH:/root/go/bin
+# Go tools MUST come first on PATH. Some apt packages (e.g. the netexec /
+# python3-httpx dependency chain) install a Python `httpx` CLI into a system
+# bin dir; if /root/go/bin were appended, that CLI would shadow
+# ProjectDiscovery's httpx (which web-recon calls with `-u`). Prepending makes
+# our Go-installed subfinder/dnsx/httpx/katana/gau/ffuf win.
+ENV PATH=/root/go/bin:$PATH
 # Unbuffered stdout so the live progress heartbeat shows up immediately in
 # `docker run` / `docker logs -f` instead of being block-buffered.
 ENV PYTHONUNBUFFERED=1
@@ -83,6 +88,24 @@ RUN go install -v github.com/ffuf/ffuf/v2@latest && \
     go install -v github.com/projectdiscovery/katana/cmd/katana@latest && \
     go install -v github.com/lc/gau/v2/cmd/gau@latest
 
+# Enforce the httpx resolution at BUILD time. The netexec / python3-httpx apt
+# chain ships a Python `httpx` CLI (Click-based, rejects web-recon's `-u` with
+# "No such option") on the system PATH; if it ever wins over ProjectDiscovery's
+# Go httpx, web-recon silently produces nothing. Fail the build loudly instead
+# of shipping a broken image. The symlink in /usr/local/bin removes any
+# dependence on PATH ordering; the `-version` check is a functional guard --
+# ProjectDiscovery httpx exits 0 for `-version`, the Python httpx CLI errors on
+# the single-dash flag, so a wrong binary can never pass here.
+RUN ln -sf /root/go/bin/httpx /usr/local/bin/httpx && \
+    resolved="$(command -v httpx)" && \
+    echo "httpx resolves to: ${resolved}" && \
+    case "${resolved}" in \
+      /root/go/bin/httpx|/usr/local/bin/httpx) : ;; \
+      *) echo "FATAL: wrong httpx on PATH (${resolved}); expected ProjectDiscovery httpx"; exit 1 ;; \
+    esac && \
+    httpx -version >/dev/null 2>&1 || \
+    { echo "FATAL: 'httpx -version' failed -- resolved binary is not ProjectDiscovery httpx"; exit 1; }
+
 # ---------------------------------------------------------------------------
 # App code
 # ---------------------------------------------------------------------------
@@ -90,8 +113,12 @@ WORKDIR /app
 COPY brain.py /app/brain.py
 COPY modules/ /app/modules/
 COPY config/ /app/config/
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
 
 # Output volume -- mount this from the host to actually get the results out
 VOLUME ["/output"]
 
-ENTRYPOINT ["python3", "/app/brain.py"]
+# The entrypoint runs brain.py as root (raw-socket scans need it) and then
+# chowns /output back to the host user so results aren't left root-owned.
+ENTRYPOINT ["/app/docker-entrypoint.sh"]

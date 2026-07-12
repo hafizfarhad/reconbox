@@ -76,6 +76,20 @@ def tool_available(binary_name):
     return shutil.which(binary_name) is not None
 
 
+def _to_text(data):
+    """
+    Normalize captured output to str. subprocess.run(text=True) returns str on
+    a normal exit, but on TimeoutExpired the exception's .stdout/.stderr come
+    back as raw bytes (a long-standing CPython behavior), which previously
+    crashed the timeout handler with 'can't concat str to bytes'.
+    """
+    if data is None:
+        return ""
+    if isinstance(data, (bytes, bytearray)):
+        return bytes(data).decode("utf-8", errors="replace")
+    return data
+
+
 def run_tool(tool_name, command_list, output_path=None, timeout=180, error_log=None):
     """
     Run a single external tool.
@@ -131,8 +145,8 @@ def run_tool(tool_name, command_list, output_path=None, timeout=180, error_log=N
         duration = time.time() - start
         msg = f"[TIMEOUT] {tool_name} exceeded {timeout}s. cmd: {' '.join(command_list)}"
         _log_error(error_log, msg)
-        partial_out = e.stdout or ""
-        partial_err = e.stderr or ""
+        partial_out = _to_text(e.stdout)
+        partial_err = _to_text(e.stderr)
         if output_path:
             _write_raw_output(output_path, command_list, partial_out,
                                partial_err + "\n[PROCESS KILLED: TIMEOUT]")

@@ -6,7 +6,10 @@ implicit-TLS ports 993/995, a plain socket for 110/143), and — only when
 read-only credentials are supplied — a mailbox/folder listing via curl.
 """
 
-from modules.services.common import register, run_nse, run_native, raw_banner, write_text
+from modules.services.common import (
+    register, run_nse, run_native, raw_banner, write_text, creds_file,
+    curl_config_value,
+)
 from config.settings import NSE_SCRIPTS
 
 # implicit-TLS port -> the curl scheme used for an authenticated listing
@@ -41,12 +44,17 @@ def _enum_mailbox(ctx, kind):
     # Authenticated read-only mailbox listing (only if creds + TLS port).
     if ctx.has_creds and ctx.port in _TLS_PORTS:
         scheme = _TLS_PORTS[ctx.port]
-        u = ctx.creds["username"]
-        p = ctx.creds["password"] or ""
-        listing = run_native(
-            ctx, f"curl-{scheme}",
-            ["curl", "-k", "-s", f"{scheme}://{ctx.host}:{ctx.port}", "--user", f"{u}:{p}"],
-            f"{ctx.port}_{kind}_listing.txt", timeout=30)
+        # Escape for the double-quoted curl --config value (see ftp.py).
+        u = curl_config_value(ctx.creds["username"])
+        p = curl_config_value(ctx.creds["password"] or "")
+        # Credentials go in a curl --config file, never on argv.
+        with creds_file(f'user = "{u}:{p}"\n',
+                        prefix="reconbox_mail_", suffix=".cfg") as cfg:
+            listing = run_native(
+                ctx, f"curl-{scheme}",
+                ["curl", "-k", "-s", f"{scheme}://{ctx.host}:{ctx.port}",
+                 "--config", cfg],
+                f"{ctx.port}_{kind}_listing.txt", timeout=30)
         steps.append({"authenticated_listing": repr(listing)})
 
     return {"steps": steps}

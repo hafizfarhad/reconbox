@@ -79,7 +79,11 @@ def main():
     for _secret_key in ("password", "shodan_api_key"):
         register_secret(config.get(_secret_key))
 
-    target = resolve_target(raw_input)
+    try:
+        target = resolve_target(raw_input)
+    except ValueError as e:
+        print(f"[FATAL] {e}")
+        sys.exit(2)
     dirs = build_dirs(target.label)
     error_log = os.path.join(dirs["meta"], "errors.log")
 
@@ -138,7 +142,8 @@ def main():
         manifest["phases"].append(dns_summary)
 
         progress.start_phase("web-recon")
-        web_summary = run_web_recon(target, dirs["web-recon"], error_log, config)
+        web_summary = run_web_recon(target, dirs["web-recon"], error_log, config,
+                                    net_summary)
         manifest["phases"].append(web_summary)
 
         progress.start_phase("osint")
