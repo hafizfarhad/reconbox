@@ -94,6 +94,29 @@ def _ports_source(d):
     return {}, []
 
 
+def _ports_from_summary(net):
+    """
+    Build a port table from the manifest summary alone, used when the raw nmap
+    files are gone or unparseable (removed by PDF-only cleanup, or left corrupt
+    by a concurrent run). The summary is populated in-memory during the scan, so
+    it still holds the ports we found even when the on-disk XML does not. Version
+    and OS detail aren't carried in the summary, so those are omitted.
+    """
+    services = net.get("services") or {}
+    rows = []
+    seen = set()
+    for portkey in net.get("open_ports") or []:
+        seen.add(portkey)
+        rows.append([portkey, "open", services.get(portkey, ""), ""])
+    for portkey in net.get("udp_ports") or []:
+        if portkey in seen:
+            continue
+        seen.add(portkey)
+        rows.append([portkey, "open", services.get(portkey, ""), ""])
+    rows.sort(key=lambda r: int(r[0].split("/")[0]))
+    return rows
+
+
 def _network_section(d, net):
     """d = network-scan dir, net = its manifest summary."""
     blocks = []
@@ -114,6 +137,19 @@ def _network_section(d, net):
         if os_matches:
             os_rows = [[m["name"], f"{m['accuracy']}%"] for m in os_matches[:5]]
             blocks.append({"type": "table", "headers": ["OS guess", "Accuracy"], "rows": os_rows})
+    else:
+        # Raw nmap XML missing or unparseable -- fall back to the manifest
+        # summary so the captured ports still render instead of the whole
+        # Network scan section silently vanishing.
+        rows = _ports_from_summary(net)
+        if rows:
+            blocks.append({"type": "note",
+                           "text": "Raw nmap output was unavailable at report time; "
+                                   "ports below are from the run summary (version/OS "
+                                   "detail omitted)."})
+            blocks.append({"type": "table",
+                           "headers": ["Port", "State", "Service", "Version"],
+                           "rows": rows})
 
     # NOTE: CVE findings are no longer dumped as a flat table here. They are
     # classified into confirmed vs version-inferred tiers by

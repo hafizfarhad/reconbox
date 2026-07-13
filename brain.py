@@ -19,6 +19,7 @@ import os
 import json
 import time
 import shutil
+import fcntl
 
 from config.settings import ALL_TOOLS, OUTPUT_ROOT
 from modules import progress
@@ -60,6 +61,30 @@ def build_dirs(label):
     return dirs
 
 
+def acquire_run_lock(base):
+    """
+    Take an exclusive, non-blocking lock on the target's output directory.
+
+    Two reconbox runs sharing /output/<label>/ silently destroy each other's
+    evidence: concurrent nmap invocations write the same -oA files and produce
+    interleaved, unparseable XML, and whichever run finishes first runs the
+    PDF-only cleanup (shutil.rmtree of network-scan/ etc.), deleting the raw
+    files the other run still needs at report time. Either way the second run's
+    report loses its nmap results.
+
+    Returns the held file object (keep it referenced for the whole run; the OS
+    releases the lock when the process exits), or None if another run holds it.
+    """
+    lock_path = os.path.join(base, ".reconbox.lock")
+    fd = open(lock_path, "w")
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fd.close()
+        return None
+    return fd
+
+
 def main():
     if len(sys.argv) != 2:
         print("Usage: python3 brain.py <domain-or-ip>")
@@ -85,6 +110,17 @@ def main():
         print(f"[FATAL] {e}")
         sys.exit(2)
     dirs = build_dirs(target.label)
+
+    # Refuse to run if another reconbox process is already writing this target's
+    # output dir -- concurrent runs corrupt nmap XML and delete each other's
+    # evidence mid-run. Held for the life of the process.
+    run_lock = acquire_run_lock(dirs["base"])  # noqa: F841 (kept alive intentionally)
+    if run_lock is None:
+        print(f"[FATAL] Another reconbox run is already writing to {dirs['base']}. "
+              f"Concurrent runs on the same target corrupt each other's evidence. "
+              f"Wait for it to finish, or scan under a different target label.")
+        sys.exit(3)
+
     error_log = os.path.join(dirs["meta"], "errors.log")
 
     # Resolution runs before the error_log path is known (the path depends on
