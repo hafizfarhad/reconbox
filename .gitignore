@@ -4,7 +4,7 @@ __pycache__/
 *.pyo
 
 # Scan results (may contain sensitive recon data)
-output/
+/output
 
 # Virtualenvs
 .venv/

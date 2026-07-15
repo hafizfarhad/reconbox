@@ -3,6 +3,8 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
 
 jobs:
   build-and-push:
@@ -11,17 +13,40 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
       - name: Log in to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      # Generate tags:
+      #   - pushes to main    -> :latest
+      #   - git tags (v1.2.3) -> :1.2.3 and :1.2 (immutable release tags)
+      # We deliberately do NOT tag every commit with its full SHA anymore: each
+      # such tag was a permanent ~2GB image, and because `apt-get update` /
+      # `go install @latest` are non-reproducible, the tags did not share
+      # layers -- so the repo grew ~2GB per commit (that was the 10+GB on Hub).
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/reconbox
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
       - name: Build and push image
         uses: docker/build-push-action@v5
         with:
           context: .
           push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/reconbox:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/reconbox:${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Reuse layers across builds so unchanged stages don't re-push, and
+          # so :latest / release tags dedupe on Docker Hub.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
